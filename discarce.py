@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """discarce — find scarce vinyl on Discogs (high want/have ratio)"""
 
-import json, sys, time, csv, io
+import json, sys, time, csv, os
 import urllib.request, urllib.error, urllib.parse
+from datetime import datetime
 
 API = "https://api.discogs.com"
 UA = "discarce/1.0 +https://github.com/schwoah/claude1"
 DELAY = {True: 1.0, False: 2.5}  # with/without token
+
+GENRES = [
+    "Electronic", "Rock", "Pop", "Hip Hop", "Jazz", "Funk / Soul",
+    "Classical", "Latin", "Reggae", "Blues", "Folk, World, & Country",
+    "Stage & Screen", "Brass & Military", "Children's", "Non-Music",
+]
 
 
 def fetch(path, params=None, token=None):
@@ -33,28 +40,118 @@ def fetch(path, params=None, token=None):
     return None
 
 
-def search(year, token, min_wants):
+def search_query(params, token, min_wants, label=""):
+    """Run a single search query, paginating until wants drop below threshold."""
     results = []
-    for page in range(1, 101):  # Discogs caps at page 100
-        print(f"  {year} p.{page}...", end="", flush=True, file=sys.stderr)
-        data = fetch("/database/search", {
-            "type": "release", "year": str(year), "format": "Vinyl",
-            "sort": "want", "sort_order": "desc", "per_page": "100", "page": str(page),
-        }, token)
+    for page in range(1, 101):
+        p = {**params, "per_page": "100", "page": str(page)}
+        pfx = f"  {label} p.{page}..." if label else f"  p.{page}..."
+        print(pfx, end="", flush=True, file=sys.stderr)
+
+        data = fetch("/database/search", p, token)
         if not data or not data.get("results"):
+            print("", file=sys.stderr)
             break
-        results.extend(data["results"])
-        if data["results"][-1].get("community", {}).get("want", 0) < min_wants:
+
+        batch = data["results"]
+        results.extend(batch)
+        total = data.get("pagination", {}).get("items", "?")
+
+        if page == 1:
+            print(f" ({total} total)", end="", file=sys.stderr)
+
+        if batch[-1].get("community", {}).get("want", 0) < min_wants:
+            print(f" stopped (below {min_wants} wants)", file=sys.stderr)
             break
         if page >= data.get("pagination", {}).get("pages", 0):
+            print(" (last page)", file=sys.stderr)
             break
-    print(f" {len(results)} found", file=sys.stderr)
+        print("", file=sys.stderr)
+
     return results
+
+
+def check_total(year, token):
+    """Quick probe to see how many total results a year has."""
+    data = fetch("/database/search", {
+        "type": "release", "year": str(year), "format": "Vinyl",
+        "sort": "want", "sort_order": "desc", "per_page": "1", "page": "1",
+    }, token)
+    if data:
+        return data.get("pagination", {}).get("items", 0)
+    return 0
+
+
+def search_year(year, token, min_wants):
+    """Search a year, auto-splitting by genre if results exceed 10k."""
+    total = check_total(year, token)
+    print(f"\n  [{year}] {total:,} vinyl releases", file=sys.stderr)
+
+    base = {"type": "release", "year": str(year), "format": "Vinyl",
+            "sort": "want", "sort_order": "desc"}
+
+    if total <= 10000:
+        return search_query(base, token, min_wants, label=str(year))
+
+    # Too many results — split by genre
+    print(f"  Exceeds 10k limit — splitting by genre...", file=sys.stderr)
+    all_results = []
+    seen_ids = set()
+
+    for genre in GENRES:
+        params = {**base, "genre": genre}
+        results = search_query(params, token, min_wants, label=f"{year}/{genre}")
+        for r in results:
+            if r["id"] not in seen_ids:
+                seen_ids.add(r["id"])
+                all_results.append(r)
+
+    print(f"  [{year}] {len(all_results)} unique results across genres", file=sys.stderr)
+    return all_results
 
 
 def ask(prompt, default):
     r = input(f"  {prompt} [{default}]: ").strip()
     return r if r else str(default)
+
+
+def save_results(releases, fmt, outdir="results"):
+    """Save results to a timestamped file."""
+    os.makedirs(outdir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if fmt == "json":
+        path = os.path.join(outdir, f"discarce_{ts}.json")
+        out = []
+        for r in releases:
+            e = dict(r)
+            if e["ratio"] == float("inf"):
+                e["ratio"] = "inf"
+            out.append(e)
+        with open(path, "w") as f:
+            json.dump(out, f, indent=2)
+
+    elif fmt == "csv":
+        path = os.path.join(outdir, f"discarce_{ts}.csv")
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["Title", "Genre", "Want", "Have", "Ratio", "Price", "For Sale", "URL"])
+            for r in releases:
+                w.writerow([r["title"], r["genre"], r["want"], r["have"],
+                            r["ratio"] if r["ratio"] != float("inf") else "inf",
+                            f"${r['price']:.2f}" if r["price"] else "", r["for_sale"] or "", r["url"]])
+
+    else:  # table → save as csv anyway
+        path = os.path.join(outdir, f"discarce_{ts}.csv")
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["Title", "Genre", "Want", "Have", "Ratio", "Price", "For Sale", "URL"])
+            for r in releases:
+                w.writerow([r["title"], r["genre"], r["want"], r["have"],
+                            r["ratio"] if r["ratio"] != float("inf") else "inf",
+                            f"${r['price']:.2f}" if r["price"] else "", r["for_sale"] or "", r["url"]])
+
+    return path
 
 
 def main():
@@ -75,7 +172,7 @@ def main():
 
     has_token = bool(token)
     delay = DELAY[has_token]
-    search_req = len(years) * 10  # estimate ~10 pages per year
+    search_req = len(years) * 10
     detail_req = len(years) * 150 if marketplace else 0
     est_min = (search_req + detail_req) * delay / 60
 
@@ -86,6 +183,7 @@ def main():
     print(f"  Format:      {fmt}")
     print(f"  Rate:        {'60' if has_token else '25'} req/min")
     print(f"  Est. time:   ~{est_min:.0f} min")
+    print(f"  Output:      results/discarce_<timestamp>.{fmt if fmt != 'table' else 'csv'}")
     print(f"  {'─' * 40}\n")
 
     if ask("Go? (y/n)", "y").lower() != "y":
@@ -94,13 +192,19 @@ def main():
 
     t0 = time.time()
 
-    # Search
+    # Search (auto-splits by genre if >10k results)
     all_results = []
     for year in years:
-        all_results.extend(search(year, token, min_wants))
+        all_results.extend(search_year(year, token, min_wants))
 
-    # Filter
-    filtered = [r for r in all_results if r.get("community", {}).get("want", 0) >= min_wants]
+    # Dedupe and filter
+    seen = set()
+    filtered = []
+    for r in all_results:
+        if r["id"] not in seen and r.get("community", {}).get("want", 0) >= min_wants:
+            seen.add(r["id"])
+            filtered.append(r)
+
     print(f"\n  {len(filtered)} releases match\n", file=sys.stderr)
 
     # Build entries
@@ -138,14 +242,20 @@ def main():
     releases.sort(key=lambda x: x["ratio"] if x["ratio"] != float("inf") else 999999, reverse=True)
 
     elapsed = time.time() - t0
-    print(f"\n  Done in {elapsed/60:.1f} min\n", file=sys.stderr)
 
-    # Output
+    # Save to file
+    outpath = save_results(releases, fmt)
+    print(f"\n  Done in {elapsed/60:.1f} min — saved to {outpath}\n", file=sys.stderr)
+
+    # Print to stdout too
     if fmt == "json":
+        out = []
         for r in releases:
-            if r["ratio"] == float("inf"):
-                r["ratio"] = "inf"
-        print(json.dumps(releases, indent=2))
+            e = dict(r)
+            if e["ratio"] == float("inf"):
+                e["ratio"] = "inf"
+            out.append(e)
+        print(json.dumps(out, indent=2))
 
     elif fmt == "csv":
         w = csv.writer(sys.stdout)
