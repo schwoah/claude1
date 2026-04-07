@@ -95,7 +95,7 @@ def main():
     token = ask("Discogs token (enter to skip)", "")
     token = token if token else None
 
-    # Fetch list
+    # Fetch list (all pages)
     print(f"\n  Fetching list {list_id}...", file=sys.stderr)
     list_data = fetch(f"/lists/{list_id}", token)
     if not list_data:
@@ -103,7 +103,21 @@ def main():
         return
 
     list_name = list_data.get("name", "Unknown")
-    items = list_data.get("items", [])
+    items = list(list_data.get("items", []))
+
+    # Paginate through remaining pages
+    pagination = list_data.get("pagination", {})
+    total_pages = pagination.get("pages", 1)
+    if total_pages > 1:
+        print(f"  Page 1/{total_pages}...", file=sys.stderr)
+        for page in range(2, total_pages + 1):
+            print(f"  Page {page}/{total_pages}...", file=sys.stderr)
+            page_data = fetch(f"/lists/{list_id}?page={page}", token)
+            if page_data and page_data.get("items"):
+                items.extend(page_data["items"])
+            else:
+                break
+
     release_items = [i for i in items if i.get("type") == "release"]
 
     print(f"  List: {list_name}", file=sys.stderr)
