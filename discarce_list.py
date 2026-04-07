@@ -187,7 +187,7 @@ def main():
 
     # Fetch list (all pages)
     print(f"\n  Fetching list {list_id}...", file=sys.stderr)
-    list_data = fetch(f"/lists/{list_id}", token)
+    list_data = fetch(f"/lists/{list_id}?per_page=100", token)
     if not list_data:
         print("  Failed to fetch list. Check the URL/ID and try again.")
         return
@@ -195,22 +195,44 @@ def main():
     list_name = list_data.get("name", "Unknown")
     items = list(list_data.get("items", []))
 
+    # Debug: show pagination info
     pagination = list_data.get("pagination", {})
     total_pages = pagination.get("pages", 1)
+    total_items = pagination.get("items", "?")
+    per_page = pagination.get("per_page", "?")
+    print(f"  API says: {total_items} items, {total_pages} pages, {per_page}/page", file=sys.stderr)
+    print(f"  Page 1: got {len(list_data.get('items', []))} items", file=sys.stderr)
+
+    # Show item types on first page for debugging
+    types = {}
+    for i in list_data.get("items", []):
+        t = i.get("type", "unknown")
+        types[t] = types.get(t, 0) + 1
+    print(f"  Item types (page 1): {types}", file=sys.stderr)
+
     if total_pages > 1:
-        print(f"  Page 1/{total_pages}...", file=sys.stderr)
         for page in range(2, total_pages + 1):
-            print(f"  Page {page}/{total_pages}...", file=sys.stderr)
-            page_data = fetch(f"/lists/{list_id}?page={page}", token)
+            print(f"  Page {page}/{total_pages}...", end="", flush=True, file=sys.stderr)
+            page_data = fetch(f"/lists/{list_id}?per_page=100&page={page}", token)
             if page_data and page_data.get("items"):
-                items.extend(page_data["items"])
+                batch = page_data["items"]
+                items.extend(batch)
+                print(f" +{len(batch)} items", file=sys.stderr)
             else:
+                print(" (empty/failed)", file=sys.stderr)
                 break
+
+    # Count types
+    all_types = {}
+    for i in items:
+        t = i.get("type", "unknown")
+        all_types[t] = all_types.get(t, 0) + 1
 
     release_items = [i for i in items if i.get("type") == "release"]
 
-    print(f"  List: {list_name}", file=sys.stderr)
-    print(f"  {len(items)} items ({len(release_items)} releases)", file=sys.stderr)
+    print(f"\n  List: {list_name}", file=sys.stderr)
+    print(f"  {len(items)} items total — types: {all_types}", file=sys.stderr)
+    print(f"  {len(release_items)} releases (type=release)", file=sys.stderr)
 
     if not release_items:
         print("  No releases found in this list.")
