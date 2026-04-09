@@ -104,12 +104,13 @@ def save_results(releases, fmt, list_id, outdir="results"):
     else:
         with open(path, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["Title", "Genre", "Want", "Have", "Ratio", "Rating", "Votes", "Price", "For Sale", "URL"])
+            w.writerow(["Title", "Genre", "Want", "Have", "Ratio", "Rating", "Votes", "Price", "For Sale", "YouTube", "URL"])
             for r in releases:
                 w.writerow([r["title"], r["genre"], r["want"], r["have"],
                             r["ratio"] if r["ratio"] != float("inf") else "inf",
                             r["rating"] or "", r["votes"] or "",
-                            f"${r['price']:.2f}" if r["price"] else "", r["for_sale"] or "", r["url"]])
+                            f"${r['price']:.2f}" if r["price"] else "", r["for_sale"] or "",
+                            r.get("youtube", ""), r["url"]])
     return path
 
 
@@ -125,12 +126,13 @@ def print_results(releases, fmt):
 
     elif fmt == "csv":
         w = csv.writer(sys.stdout)
-        w.writerow(["Title", "Genre", "Want", "Have", "Ratio", "Rating", "Votes", "Price", "For Sale", "URL"])
+        w.writerow(["Title", "Genre", "Want", "Have", "Ratio", "Rating", "Votes", "Price", "For Sale", "YouTube", "URL"])
         for r in releases:
             w.writerow([r["title"], r["genre"], r["want"], r["have"],
                         r["ratio"] if r["ratio"] != float("inf") else "inf",
                         r["rating"] or "", r["votes"] or "",
-                        f"${r['price']:.2f}" if r["price"] else "", r["for_sale"] or "", r["url"]])
+                        f"${r['price']:.2f}" if r["price"] else "", r["for_sale"] or "",
+                        r.get("youtube", ""), r["url"]])
 
     else:
         pfx = lambda v: f"${v:.2f}" if v else "—"
@@ -139,7 +141,7 @@ def print_results(releases, fmt):
         scarce = [r for r in releases if r["ratio"] > 1.0 or r["ratio"] == float("inf")]
         common = [r for r in releases if r["ratio"] <= 1.0]
 
-        header = f"{'Title':<42} {'Genre':<18} {'Want':>5} {'Have':>5} {'Ratio':>6} {'Rate':>5} {'Price':>8} {'#':>4}  URL"
+        header = f"{'Title':<42} {'Genre':<18} {'Want':>5} {'Have':>5} {'Ratio':>6} {'Rate':>5} {'Price':>8} {'#':>4} {'YT':>3}  URL"
 
         if scarce:
             print(f"\n  SCARCE (ratio > 1.0) — {len(scarce)} releases")
@@ -150,7 +152,8 @@ def print_results(releases, fmt):
                 g = r['genre'][:16] + ".." if len(r['genre']) > 18 else r['genre']
                 rt = f"{r['rating']}" if r['rating'] else "—"
                 fs = str(r['for_sale']) if r['for_sale'] is not None else "—"
-                print(f"{t:<42} {g:<18} {r['want']:>5} {r['have']:>5} {rat_s(r['ratio']):>6} {rt:>5} {pfx(r['price']):>8} {fs:>4}  {r['url']}")
+                yt = f"{r.get('videos', 0)}" if r.get("youtube") else "—"
+                print(f"{t:<42} {g:<18} {r['want']:>5} {r['have']:>5} {rat_s(r['ratio']):>6} {rt:>5} {pfx(r['price']):>8} {fs:>4} {yt:>3}  {r['url']}")
 
         if common:
             print(f"\n  COMMON (ratio <= 1.0) — {len(common)} releases")
@@ -161,7 +164,8 @@ def print_results(releases, fmt):
                 g = r['genre'][:16] + ".." if len(r['genre']) > 18 else r['genre']
                 rt = f"{r['rating']}" if r['rating'] else "—"
                 fs = str(r['for_sale']) if r['for_sale'] is not None else "—"
-                print(f"{t:<42} {g:<18} {r['want']:>5} {r['have']:>5} {rat_s(r['ratio']):>6} {rt:>5} {pfx(r['price']):>8} {fs:>4}  {r['url']}")
+                yt = f"{r.get('videos', 0)}" if r.get("youtube") else "—"
+                print(f"{t:<42} {g:<18} {r['want']:>5} {r['have']:>5} {rat_s(r['ratio']):>6} {rt:>5} {pfx(r['price']):>8} {fs:>4} {yt:>3}  {r['url']}")
 
         print("─" * 130)
         print(f"{len(releases)} total — {len(scarce)} scarce, {len(common)} common")
@@ -292,6 +296,10 @@ def main():
         genres = d.get("genres", []) + d.get("styles", [])
         title = f"{', '.join(a['name'] for a in d.get('artists', []))} - {d.get('title', '?')}"
 
+        # Extract YouTube videos
+        videos = d.get("videos", [])
+        youtube = [v["uri"] for v in videos if v.get("uri") and "youtube" in v.get("uri", "").lower()]
+
         entry = {
             "_rid": rid,
             "title": title,
@@ -303,6 +311,8 @@ def main():
             "votes": votes if votes else None,
             "price": d.get("lowest_price"),
             "for_sale": d.get("num_for_sale", 0),
+            "youtube": youtube[0] if youtube else None,
+            "videos": len(videos),
             "url": f"https://www.discogs.com/release/{rid}",
         }
 

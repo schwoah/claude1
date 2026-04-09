@@ -149,11 +149,13 @@ def save_results(releases, fmt, outdir="results"):
     else:
         with open(path, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["Title", "Genre", "Want", "Have", "Ratio", "Price", "For Sale", "URL"])
+            w.writerow(["Title", "Genre", "Want", "Have", "Ratio", "Rating", "Votes", "Price", "For Sale", "YouTube", "URL"])
             for r in releases:
                 w.writerow([r["title"], r["genre"], r["want"], r["have"],
                             r["ratio"] if r["ratio"] != float("inf") else "inf",
-                            f"${r['price']:.2f}" if r["price"] else "", r["for_sale"] or "", r["url"]])
+                            r.get("rating", "") or "", r.get("votes", "") or "",
+                            f"${r['price']:.2f}" if r["price"] else "", r["for_sale"] or "",
+                            r.get("youtube", ""), r["url"]])
     return path
 
 
@@ -234,7 +236,9 @@ def main():
             "genre": ", ".join(r.get("genre", r.get("style", ["?"]))),
             "want": want, "have": have,
             "ratio": round(want / have, 1) if have else float("inf"),
+            "rating": None, "votes": None,
             "price": None, "for_sale": None,
+            "youtube": None, "videos": 0,
             "url": f"https://www.discogs.com/release/{rid}",
         }
 
@@ -255,6 +259,13 @@ def main():
                 g = d.get("genres", []) + d.get("styles", [])
                 if g:
                     entry["genre"] = ", ".join(g)
+                ri = dc.get("rating", {})
+                entry["rating"] = round(ri.get("average", 0), 2) or None
+                entry["votes"] = ri.get("count", 0) or None
+                vids = d.get("videos", [])
+                yt = [v["uri"] for v in vids if "youtube" in v.get("uri", "").lower()]
+                entry["youtube"] = yt[0] if yt else None
+                entry["videos"] = len(vids)
 
         releases.append(entry)
 
@@ -278,22 +289,26 @@ def main():
 
     elif fmt == "csv":
         w = csv.writer(sys.stdout)
-        w.writerow(["Title", "Genre", "Want", "Have", "Ratio", "Price", "For Sale", "URL"])
+        w.writerow(["Title", "Genre", "Want", "Have", "Ratio", "Rating", "Votes", "Price", "For Sale", "YouTube", "URL"])
         for r in releases:
             w.writerow([r["title"], r["genre"], r["want"], r["have"],
                         r["ratio"] if r["ratio"] != float("inf") else "inf",
-                        f"${r['price']:.2f}" if r["price"] else "", r["for_sale"] or "", r["url"]])
+                        r.get("rating", "") or "", r.get("votes", "") or "",
+                        f"${r['price']:.2f}" if r["price"] else "", r["for_sale"] or "",
+                        r.get("youtube", ""), r["url"]])
 
     else:
         pfx = lambda v: f"${v:.2f}" if v else "—"
-        print(f"\n{'Title':<45} {'Genre':<22} {'Want':>5} {'Have':>5} {'Ratio':>6} {'Price':>8} {'#':>4}  URL")
-        print("─" * 130)
+        print(f"\n{'Title':<45} {'Genre':<20} {'Want':>5} {'Have':>5} {'Ratio':>6} {'Rate':>5} {'Price':>8} {'#':>4} {'YT':>3}  URL")
+        print("─" * 135)
         for r in releases:
             t = r['title'][:43] + ".." if len(r['title']) > 45 else r['title']
-            g = r['genre'][:20] + ".." if len(r['genre']) > 22 else r['genre']
+            g = r['genre'][:18] + ".." if len(r['genre']) > 20 else r['genre']
             rat = f"{r['ratio']}" if r['ratio'] != float('inf') else "inf"
             fs = str(r['for_sale']) if r['for_sale'] is not None else "—"
-            print(f"{t:<45} {g:<22} {r['want']:>5} {r['have']:>5} {rat:>6} {pfx(r['price']):>8} {fs:>4}  {r['url']}")
+            rt = f"{r.get('rating')}" if r.get('rating') else "—"
+            yt = f"{r.get('videos', 0)}" if r.get("youtube") else "—"
+            print(f"{t:<45} {g:<20} {r['want']:>5} {r['have']:>5} {rat:>6} {rt:>5} {pfx(r['price']):>8} {fs:>4} {yt:>3}  {r['url']}")
         print("─" * 130)
         print(f"{len(releases)} releases")
 
