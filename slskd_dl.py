@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """slskd_dl — search & download music from a CSV list via slskd API"""
 
-import json, sys, time, csv, os, re
+import json, sys, time, csv, os, re, platform, zipfile, subprocess, atexit, secrets
 import urllib.request, urllib.error, urllib.parse
 from datetime import datetime
 
@@ -26,6 +26,219 @@ HEADER_ALIASES = {
 def ask(prompt, default=""):
     r = input(f"  {prompt} [{default}]: ").strip()
     return r if r else str(default)
+
+
+SLSKD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".slskd")
+SLSKD_PROCESS = None
+
+
+def get_slskd_platform_suffix():
+    """Return the slskd release suffix for the current platform."""
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        arch = "x64"
+    elif machine in ("aarch64", "arm64"):
+        arch = "arm64"
+    else:
+        arch = "x64"
+    if system == "linux":
+        return f"linux-{arch}"
+    if system == "darwin":
+        return f"osx-{arch}"
+    if system == "windows":
+        return f"win-{arch}"
+    return f"linux-{arch}"
+
+
+def get_latest_slskd_version():
+    """Fetch the latest slskd release tag from GitHub API."""
+    url = "https://api.github.com/repos/slskd/slskd/releases/latest"
+    req = urllib.request.Request(url, headers={"Accept": "application/json",
+                                               "User-Agent": "slskd_dl"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode())
+            return data["tag_name"]
+    except Exception as e:
+        print(f"  Error fetching latest slskd version: {e}", file=sys.stderr)
+        return None
+
+
+def download_slskd(version):
+    """Download and extract slskd binary. Returns path to executable."""
+    os.makedirs(SLSKD_DIR, exist_ok=True)
+    suffix = get_slskd_platform_suffix()
+    zip_name = f"slskd-{version}-{suffix}.zip"
+    zip_url = f"https://github.com/slskd/slskd/releases/download/{version}/{zip_name}"
+    zip_path = os.path.join(SLSKD_DIR, zip_name)
+
+    exe_name = "slskd.exe" if platform.system().lower() == "windows" else "slskd"
+    exe_path = os.path.join(SLSKD_DIR, exe_name)
+
+    if os.path.isfile(exe_path):
+        print(f"  slskd binary already exists at {exe_path}", file=sys.stderr)
+        return exe_path
+
+    print(f"  Downloading slskd {version} for {suffix}...", file=sys.stderr)
+    try:
+        urllib.request.urlretrieve(zip_url, zip_path)
+    except Exception as e:
+        print(f"  Download failed: {e}", file=sys.stderr)
+        return None
+
+    print(f"  Extracting...", file=sys.stderr)
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(SLSKD_DIR)
+    except Exception as e:
+        print(f"  Extraction failed: {e}", file=sys.stderr)
+        return None
+
+    os.remove(zip_path)
+
+    if os.path.isfile(exe_path):
+        os.chmod(exe_path, 0o755)
+        return exe_path
+
+    # Some releases nest files — look for the binary
+    for root, dirs, files in os.walk(SLSKD_DIR):
+        if exe_name in files:
+            found = os.path.join(root, exe_name)
+            os.chmod(found, 0o755)
+            return found
+
+    print(f"  Could not find slskd binary after extraction", file=sys.stderr)
+    return None
+
+
+def write_slskd_config(slsk_user, slsk_pass, api_key, port=5030):
+    """Write minimal slskd.yml config. Returns path."""
+    config_path = os.path.join(SLSKD_DIR, "slskd.yml")
+    # YAML manually to avoid dependency
+    config = (
+        f"soulseek:\n"
+        f"  username: {slsk_user}\n"
+        f"  password: {slsk_pass}\n"
+        f"web:\n"
+        f"  port: {port}\n"
+        f"  authentication:\n"
+        f"    disabled: true\n"
+        f"    api_keys:\n"
+        f"      slskd_dl:\n"
+        f"        key: {api_key}\n"
+        f"directories:\n"
+        f"  downloads: {os.path.join(SLSKD_DIR, 'downloads')}\n"
+        f"  incomplete: {os.path.join(SLSKD_DIR, 'incomplete')}\n"
+    )
+    with open(config_path, "w") as f:
+        f.write(config)
+    os.makedirs(os.path.join(SLSKD_DIR, "downloads"), exist_ok=True)
+    os.makedirs(os.path.join(SLSKD_DIR, "incomplete"), exist_ok=True)
+    return config_path
+
+
+def stop_slskd():
+    """Shutdown slskd process on exit."""
+    global SLSKD_PROCESS
+    if SLSKD_PROCESS and SLSKD_PROCESS.poll() is None:
+        print("\n  Stopping slskd...", file=sys.stderr)
+        SLSKD_PROCESS.terminate()
+        try:
+            SLSKD_PROCESS.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            SLSKD_PROCESS.kill()
+
+
+def start_slskd(exe_path, config_path):
+    """Launch slskd as a background subprocess. Returns process."""
+    global SLSKD_PROCESS
+    log_path = os.path.join(SLSKD_DIR, "slskd.log")
+    log_file = open(log_path, "w")
+    SLSKD_PROCESS = subprocess.Popen(
+        [exe_path, "--config", config_path],
+        stdout=log_file,
+        stderr=log_file,
+        cwd=SLSKD_DIR,
+    )
+    atexit.register(stop_slskd)
+    return SLSKD_PROCESS
+
+
+def wait_for_slskd(base_url, api_key, timeout=30):
+    """Wait for slskd to become responsive."""
+    for i in range(timeout):
+        try:
+            result = slskd_api("GET", "/application", base_url, api_key)
+            if result is not None:
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
+    return False
+
+
+def ensure_slskd(base_url, api_key):
+    """Check if slskd is running; if not, offer to download and start it.
+    Returns (base_url, api_key) — possibly updated if we launched it."""
+    # Try connecting to existing instance
+    try:
+        req = urllib.request.Request(
+            f"{base_url}/api/v0/application",
+            headers={"X-API-Key": api_key, "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=5):
+            return base_url, api_key  # Already running
+    except Exception:
+        pass
+
+    print("  slskd is not running.", file=sys.stderr)
+    answer = ask("Download and start slskd automatically? (y/n)", "y")
+    if answer.lower() not in ("y", "yes"):
+        print("  Please start slskd manually and re-run.", file=sys.stderr)
+        sys.exit(1)
+
+    # Get credentials
+    slsk_user = ask("Soulseek username", "")
+    if not slsk_user:
+        print("  Soulseek username is required.", file=sys.stderr)
+        sys.exit(1)
+    slsk_pass = ask("Soulseek password", "")
+    if not slsk_pass:
+        print("  Soulseek password is required.", file=sys.stderr)
+        sys.exit(1)
+
+    # Generate API key for this session
+    api_key = secrets.token_hex(16)
+
+    # Download binary
+    version = get_latest_slskd_version()
+    if not version:
+        print("  Could not determine latest slskd version.", file=sys.stderr)
+        sys.exit(1)
+
+    exe_path = download_slskd(version)
+    if not exe_path:
+        print("  Failed to download slskd.", file=sys.stderr)
+        sys.exit(1)
+
+    # Write config and launch
+    config_path = write_slskd_config(slsk_user, slsk_pass, api_key)
+    print(f"  Starting slskd...", file=sys.stderr)
+    proc = start_slskd(exe_path, config_path)
+
+    print(f"  Waiting for slskd to start (PID {proc.pid})...", file=sys.stderr)
+    if not wait_for_slskd(base_url, api_key, timeout=30):
+        # Check if process died
+        if proc.poll() is not None:
+            log_path = os.path.join(SLSKD_DIR, "slskd.log")
+            print(f"  slskd exited with code {proc.returncode}. Check {log_path}",
+                  file=sys.stderr)
+        else:
+            print(f"  slskd did not respond in time.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"  slskd is running (PID {proc.pid})\n", file=sys.stderr)
+    return base_url, api_key
 
 
 # ── slskd API helper ──────────────────────────────────────────────────────────
@@ -312,6 +525,9 @@ def main():
         print("  With headers: artist,title,album  (album optional)")
         print("  Without headers: col1=artist, col2=title, col3=album")
         print()
+        print("If slskd is not running, the script will offer to download")
+        print("and start it automatically (prompts for Soulseek credentials).")
+        print()
         print("Options are configured interactively at startup.")
         print("Set SLSKD_URL and SLSKD_API_KEY env vars to skip prompts.")
         sys.exit(0)
@@ -327,9 +543,6 @@ def main():
     base_url = os.environ.get("SLSKD_URL") or ask("slskd URL", DEFAULT_URL)
     base_url = base_url.rstrip("/")
     api_key = os.environ.get("SLSKD_API_KEY") or ask("slskd API key", "")
-    if not api_key:
-        print("Error: API key is required", file=sys.stderr)
-        sys.exit(1)
 
     timeout = int(ask("Search timeout (seconds)", str(SEARCH_TIMEOUT)))
 
@@ -341,11 +554,8 @@ def main():
 
     print(f"\n  Found {len(entries)} entries to process\n", file=sys.stderr)
 
-    # Test connection
-    app_info = slskd_api("GET", "/application", base_url, api_key)
-    if not app_info:
-        print("Error: cannot connect to slskd. Check URL and API key.", file=sys.stderr)
-        sys.exit(1)
+    # Connect to slskd — or download & launch it
+    base_url, api_key = ensure_slskd(base_url, api_key)
     print(f"  Connected to slskd\n", file=sys.stderr)
 
     # Process each entry
